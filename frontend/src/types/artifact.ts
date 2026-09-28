@@ -28,4 +28,8 @@ export interface Artifact {
   collector: string
   /** 临时存放位置 */
   tempLocation: string
+  /** 合并地层单位时转入：原单位号（曾用号），未经历合并则为空 */
+  mergedFromCode: string
+  /** 深度越界核对说明：合并后出土深度超出保留单位区间时持久标记，空串表示无 */
+  depthNote: string
 }

@@ -4,7 +4,7 @@ import Dexie, { type Table } from 'dexie'
 import type { Artifact, Relation, Stratum, Trench } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -47,6 +47,36 @@ class TrenchLogDb extends Dexie {
             }
             if (!Array.isArray(stratum.inclusions)) {
               stratum.inclusions = []
+            }
+          })
+      })
+    // v3：地层单位增加「曾用号」，出土物增加「并入来源 / 深度越界标记」，支撑地层单位合并
+    this.version(SCHEMA_VERSION)
+      .stores({
+        trenches: 'id, code, area, backfilled',
+        strata: 'id, trenchId, code, type, topDepth',
+        artifacts: 'id, stratumId, code, category, date',
+        relations: 'id, unitAId, unitBId, type, basis',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Stratum, string>('strata')
+          .toCollection()
+          .modify((stratum) => {
+            if (!Array.isArray(stratum.formerCodes)) {
+              stratum.formerCodes = []
+            }
+          })
+        await tx
+          .table<Artifact, string>('artifacts')
+          .toCollection()
+          .modify((artifact) => {
+            if (artifact.mergedFromCode === undefined) {
+              artifact.mergedFromCode = ''
+            }
+            if (artifact.depthNote === undefined) {
+              artifact.depthNote = ''
             }
           })
       })
@@ -134,7 +164,8 @@ export async function seedDemoData(): Promise<void> {
       inclusions: ['陶片', '炭屑'],
       formation: '近现代耕土层',
       date: today,
-      drawingNo: 'T0501-北壁-01'
+      drawingNo: 'T0501-北壁-01',
+      formerCodes: []
     },
     {
       id: 'st_0501_l2',
@@ -148,7 +179,8 @@ export async function seedDemoData(): Promise<void> {
       inclusions: ['陶片', '骨'],
       formation: '汉代文化层',
       date: today,
-      drawingNo: 'T0501-北壁-02'
+      drawingNo: 'T0501-北壁-02',
+      formerCodes: []
     },
     {
       id: 'st_0501_h12',
@@ -162,7 +194,8 @@ export async function seedDemoData(): Promise<void> {
       inclusions: ['陶片', '骨', '炭屑'],
       formation: '生活垃圾坑',
       date: today,
-      drawingNo: 'T0501-H12-平剖面'
+      drawingNo: 'T0501-H12-平剖面',
+      formerCodes: []
     },
     {
       id: 'st_0502_l1',
@@ -176,7 +209,8 @@ export async function seedDemoData(): Promise<void> {
       inclusions: ['陶片'],
       formation: '耕土层',
       date: today,
-      drawingNo: 'T0502-西壁-01'
+      drawingNo: 'T0502-西壁-01',
+      formerCodes: []
     }
   ])
 
@@ -193,7 +227,9 @@ export async function seedDemoData(): Promise<void> {
       z: 0.42,
       date: today,
       collector: '祁野',
-      tempLocation: '工地临时柜 A-2'
+      tempLocation: '工地临时柜 A-2',
+      mergedFromCode: '',
+      depthNote: ''
     },
     {
       id: 'af_002',
@@ -207,7 +243,9 @@ export async function seedDemoData(): Promise<void> {
       z: 1.05,
       date: today,
       collector: '祁野',
-      tempLocation: '工地临时柜 A-3'
+      tempLocation: '工地临时柜 A-3',
+      mergedFromCode: '',
+      depthNote: ''
     }
   ])
 

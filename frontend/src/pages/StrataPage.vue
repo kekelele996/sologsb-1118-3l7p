@@ -2,15 +2,16 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Inclusion, Stratum, UnitType } from '@/types'
-import { INCLUSIONS, UNIT_TYPES, isCodeDuplicated, isDepthInverted, stratumThickness } from '@/types'
+import { INCLUSIONS, UNIT_TYPES, isCodeDuplicated, isDepthInverted, isDepthWithin, stratumThickness } from '@/types'
 import StratumDepthBar from '@/components/common/StratumDepthBar.vue'
 import TrenchTag from '@/components/common/TrenchTag.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { useStratumOrder } from '@/hooks/useStratumOrder'
-import { stratumStore } from '@/stores/stratumStore'
+import { stratumStore, MergeConflictError } from '@/stores/stratumStore'
 import { trenchStore } from '@/stores/trenchStore'
 import { artifactStore } from '@/stores/artifactStore'
 import { relationStore } from '@/stores/relationStore'
+import { planMergeStrata, type MergePlan } from '@/utils/merge'
 import { uid } from '@/utils/id'
 
 const trenchState = useStore(trenchStore)
@@ -66,6 +67,13 @@ function artifactsOf(stratumId: string): number {
   return artifactState.artifacts.filter((item) => item.stratumId === stratumId).reduce((sum, item) => sum + item.count, 0)
 }
 
+/** 该单位下深度越界的出土物（持久标记或实时不在区间内） */
+function outOfRangeOf(stratum: Stratum) {
+  return artifactState.artifacts.filter(
+    (item) => item.stratumId === stratum.id && (!!item.depthNote || !isDepthWithin(stratum, item.z))
+  )
+}
+
 function invertedOf(stratum: Stratum): boolean {
   return isDepthInverted(stratum)
 }
@@ -77,6 +85,7 @@ function duplicatedOf(stratum: Stratum): boolean {
 function rowClass(param: { row: Stratum }): string {
   if (invertedOf(param.row)) return 'inverted-row'
   if (duplicatedOf(param.row)) return 'duplicate-row'
+  if (outOfRangeOf(param.row).length > 0) return 'oor-row'
   return ''
 }
 
@@ -160,7 +169,9 @@ async function submit(): Promise<void> {
     inclusions: [...form.inclusions],
     formation: form.formation.trim(),
     date: form.date,
-    drawingNo: form.drawingNo.trim()
+    drawingNo: form.drawingNo.trim(),
+    // 曾用号是合并留存的档案信息，普通编辑不覆盖
+    formerCodes: editingId.value ? stratumState.strata.find((item) => item.id === editingId.value)?.formerCodes ?? [] : []
   }
   await stratumStore.getState().save(row)
   if (isDepthInverted(row)) {
@@ -193,6 +204,99 @@ async function applyBatchType(): Promise<void> {
   await stratumStore.getState().bulkSetType(selectedIds.value, batchType.value)
   ElMessage.success(`已把 ${selectedIds.value.length} 个单位的类型调整为「${batchType.value}」`)
 }
+
+/* ---------- 地层单位合并 ---------- */
+
+const mergeVisible = ref(false)
+const mergeTrenchId = ref('')
+const mergeTargetId = ref('')
+const mergeSourceId = ref('')
+const merging = ref(false)
+
+/** 同探方内可选单位 */
+const mergeCandidates = computed(() =>
+  stratumState.strata.filter((item) => !mergeTrenchId.value || item.trenchId === mergeTrenchId.value)
+)
+const mergeTargetOptions = computed(() => mergeCandidates.value.filter((item) => item.id !== mergeSourceId.value))
+const mergeSourceOptions = computed(() => mergeCandidates.value.filter((item) => item.id !== mergeTargetId.value))
+
+/** 预检明细（纯模拟，不写数据） */
+const mergePlan = computed<MergePlan | null>(() => {
+  if (!mergeTargetId.value || !mergeSourceId.value) return null
+  if (mergeTargetId.value === mergeSourceId.value) return null
+  return planMergeStrata({
+    strata: stratumState.strata,
+    artifacts: artifactState.artifacts,
+    relations: relationState.relations,
+    targetId: mergeTargetId.value,
+    sourceId: mergeSourceId.value
+  })
+})
+
+function unitBrief(stratumId: string): string {
+  const item = stratumState.strata.find((row) => row.id === stratumId)
+  return item ? `${item.code}（${item.type} · ${item.topDepth}–${item.bottomDepth} m）` : '—'
+}
+
+/** 改写后关系的两端单位号（预检时待并入单位已用保留单位号展示） */
+function rewrittenEndText(plan: MergePlan, endpointId: string): string {
+  const id = endpointId === plan.source.id ? plan.target.id : endpointId
+  return unitBrief(id)
+}
+
+function openMerge(): void {
+  // 勾选了两个同探方单位时直接带入；否则取当前筛选探方
+  const picked = selectedIds.value
+    .map((id) => stratumState.strata.find((row) => row.id === id))
+    .filter((item): item is Stratum => !!item)
+  const sameTrench = picked.filter((item) => item.trenchId === picked[0]?.trenchId)
+  mergeTrenchId.value = sameTrench.length === 2 ? sameTrench[0].trenchId : filterTrenchId.value || trenchState.trenches[0]?.id || ''
+  if (sameTrench.length === 2) {
+    mergeTargetId.value = sameTrench[0].id
+    mergeSourceId.value = sameTrench[1].id
+  } else {
+    mergeTargetId.value = ''
+    mergeSourceId.value = ''
+  }
+  mergeVisible.value = true
+}
+
+async function confirmMerge(): Promise<void> {
+  if (!mergePlan.value) return
+  const { target, source, artifactPieceCount, rewrittenCount, duplicateCount, outOfRangeArtifacts } = mergePlan.value
+  try {
+    await ElMessageBox.confirm(
+      `确认把「${source.code}」并入「${target.code}」？将转入出土物合计 ${artifactPieceCount} 件、改写层位关系 ${rewrittenCount} 条` +
+        (duplicateCount > 0 ? `、去重删除 ${duplicateCount} 条` : '') +
+        (outOfRangeArtifacts.length > 0 ? `；其中 ${outOfRangeArtifacts.length} 件出土深度越界会标出` : '') +
+        '。旧单位号将作为曾用号保留，操作不可自动撤销。',
+      '合并确认',
+      { type: 'warning', confirmButtonText: '确认合并', cancelButtonText: '再想想' }
+    )
+  } catch {
+    return
+  }
+
+  merging.value = true
+  try {
+    await stratumStore.getState().mergeUnits(mergeTargetId.value, mergeSourceId.value)
+    ElMessage.success(
+      `已合并：${source.code} 并入 ${target.code}` +
+        (outOfRangeArtifacts.length > 0 ? `，${outOfRangeArtifacts.length} 件出土物深度越界已标出，请核对层位` : '')
+    )
+    mergeVisible.value = false
+  } catch (error) {
+    if (error instanceof MergeConflictError) {
+      // 预检冲突：两份记录原样保留（计划文本已在对话框内展示，这里再提示一次）
+      ElMessage.error('存在冲突，已取消合并，两个单位原样保留')
+    } else {
+      // 写入中途失败：事务回滚，两份记录原样保留
+      ElMessage.error('合并写入失败，数据已回滚，两个单位原样保留')
+    }
+  } finally {
+    merging.value = false
+  }
+}
 </script>
 
 <template>
@@ -204,9 +308,14 @@ async function applyBatchType(): Promise<void> {
           按类型与深度区间筛选；层序倒置（上界大于下界）与同一探方内单位号重复即时高亮提示，深度刻度条展示厚度。
         </p>
       </div>
-      <el-button type="primary" @click="openCreate">
-        <el-icon><Plus /></el-icon>新建地层单位
-      </el-button>
+      <div class="head-actions">
+        <el-button type="primary" @click="openCreate">
+          <el-icon><Plus /></el-icon>新建地层单位
+        </el-button>
+        <el-button type="warning" plain @click="openMerge">
+          <el-icon><Connection /></el-icon>合并重复单位
+        </el-button>
+      </div>
     </div>
 
     <el-alert
@@ -273,10 +382,21 @@ async function applyBatchType(): Promise<void> {
           <span class="mono">{{ trenchLabel(row.trenchId) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="单位号" width="110">
+      <el-table-column label="单位号" width="150">
         <template #default="{ row }: { row: Stratum }">
           <span class="mono">{{ row.code }}</span>
           <el-tag v-if="duplicatedOf(row)" type="warning" size="small" effect="dark" class="mini">重复</el-tag>
+          <el-tag
+            v-for="code in row.formerCodes ?? []"
+            :key="code"
+            type="info"
+            size="small"
+            effect="plain"
+            class="mini former"
+            :title="`曾用单位号 ${code}（已并入）`"
+          >
+            曾用 {{ code }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="类型" width="120">
@@ -297,13 +417,26 @@ async function applyBatchType(): Promise<void> {
           <span v-if="row.inclusions.length === 0" class="muted">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="出土物" width="90">
-        <template #default="{ row }: { row: Stratum }">{{ artifactsOf(row.id) }} 件</template>
+      <el-table-column label="出土物" width="120">
+        <template #default="{ row }: { row: Stratum }">
+          <span>{{ artifactsOf(row.id) }} 件</span>
+          <el-tooltip
+            v-if="outOfRangeOf(row).length > 0"
+            placement="top"
+            effect="dark"
+            :content="`${outOfRangeOf(row).length} 件出土物深度越界：${outOfRangeOf(row)
+              .map((item) => item.code)
+              .join('、')}`"
+          >
+            <el-tag type="danger" size="small" effect="dark" class="mini">越界 {{ outOfRangeOf(row).length }}</el-tag>
+          </el-tooltip>
+        </template>
       </el-table-column>
       <el-table-column label="校验" width="110">
         <template #default="{ row }: { row: Stratum }">
           <el-tag v-if="invertedOf(row)" type="danger" size="small" effect="dark">层序倒置</el-tag>
           <el-tag v-else-if="conflictOf(row.code)" type="warning" size="small" effect="dark">关系矛盾</el-tag>
+          <el-tag v-else-if="outOfRangeOf(row).length > 0" type="danger" size="small" effect="plain">深度越界</el-tag>
           <el-tag v-else type="success" size="small" effect="plain">正常</el-tag>
         </template>
       </el-table-column>
@@ -392,12 +525,141 @@ async function applyBatchType(): Promise<void> {
         <el-button type="primary" @click="submit">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="mergeVisible" title="合并重复地层单位" width="720px">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        class="alert"
+        title="把同一探方内重复登记的单位并为一个：器物与层位关系集中到保留单位，旧单位号作为曾用号留存"
+      />
+      <el-form label-width="110px">
+        <el-form-item label="所属探方" required>
+          <el-select v-model="mergeTrenchId" placeholder="先选择探方" style="width: 320px" @update:model-value="() => { mergeTargetId = ''; mergeSourceId = '' }">
+            <el-option v-for="trench in trenchState.trenches" :key="trench.id" :label="`${trench.area} · ${trench.code}`" :value="trench.id" />
+          </el-select>
+        </el-form-item>
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="保留单位" required>
+              <el-select v-model="mergeTargetId" placeholder="合并后保留此单位" filterable style="width: 100%">
+                <el-option
+                  v-for="item in mergeTargetOptions"
+                  :key="item.id"
+                  :label="`${item.code}（${item.type} · ${item.topDepth}–${item.bottomDepth} m）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="待并入单位" required>
+              <el-select v-model="mergeSourceId" placeholder="合并后删除此单位" filterable style="width: 100%">
+                <el-option
+                  v-for="item in mergeSourceOptions"
+                  :key="item.id"
+                  :label="`${item.code}（${item.type} · ${item.topDepth}–${item.bottomDepth} m）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
+
+      <div v-if="!mergePlan" class="merge-empty muted">请选择保留单位与待并入单位，系统会先模拟合并结果供核对。</div>
+
+      <template v-else>
+        <el-card shadow="never" class="merge-card">
+          <template #header>
+            <span class="mono">{{ mergePlan.source.code }} → 并入 → {{ mergePlan.target.code }}</span>
+          </template>
+          <el-descriptions :column="2" border size="small">
+            <el-descriptions-item label="转入出土物">
+              <b :class="{ 'oor-text': mergePlan.outOfRangeArtifacts.length > 0 }">
+                {{ mergePlan.artifacts.length }} 条登记 / 合计 {{ mergePlan.artifactPieceCount }} 件
+              </b>
+            </el-descriptions-item>
+            <el-descriptions-item label="其中深度越界">
+              <b :class="mergePlan.outOfRangeArtifacts.length > 0 ? 'oor-text' : ''">
+                {{ mergePlan.outOfRangeArtifacts.length }} 件（将逐条标出）
+              </b>
+            </el-descriptions-item>
+            <el-descriptions-item label="改写层位关系">{{ mergePlan.rewrittenCount }} 条端点改写</el-descriptions-item>
+            <el-descriptions-item label="去重删除">{{ mergePlan.duplicateCount }} 条重复关系</el-descriptions-item>
+          </el-descriptions>
+
+          <div v-if="mergePlan.rewrittenRelations.length > 0" class="merge-block">
+            <p class="block-title">将改写的关系（{{ mergePlan.rewrittenRelations.length }}）</p>
+            <ul class="merge-list">
+              <li v-for="item in mergePlan.rewrittenRelations" :key="item.relation.id">
+                <span class="mono">{{ rewrittenEndText(mergePlan, item.updated.unitAId) }}</span>
+                <el-tag size="small" effect="dark" class="mini">{{ item.relation.type }}</el-tag>
+                <span class="mono">{{ rewrittenEndText(mergePlan, item.updated.unitBId) }}</span>
+                <span class="muted">（{{ item.detail }}）</span>
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="mergePlan.duplicateRelations.length > 0" class="merge-block">
+            <p class="block-title">去重后删除的重复关系（{{ mergePlan.duplicateRelations.length }}）</p>
+            <ul class="merge-list">
+              <li v-for="item in mergePlan.duplicateRelations" :key="item.id" class="muted mono">
+                {{ rewrittenEndText(mergePlan, item.unitAId) }} {{ item.type }} {{ rewrittenEndText(mergePlan, item.unitBId) }}
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="mergePlan.outOfRangeArtifacts.length > 0" class="merge-block">
+            <p class="block-title oor-text">深度越界器物（{{ mergePlan.outOfRangeArtifacts.length }} 件登记）</p>
+            <ul class="merge-list">
+              <li v-for="item in mergePlan.outOfRangeArtifacts" :key="item.artifact.id">
+                <el-tag type="danger" size="small" effect="dark" class="mini">越界</el-tag>
+                <span class="mono">{{ item.artifact.code }}</span>
+                <span class="muted">Z = {{ item.artifact.z }} m，不在保留单位 {{ mergePlan.target.code }} 区间内</span>
+              </li>
+            </ul>
+          </div>
+        </el-card>
+
+        <el-alert
+          v-if="mergePlan.conflicts.length > 0"
+          type="error"
+          class="alert"
+          :closable="false"
+          show-icon
+          title="检测到冲突，不能合并；两份记录将原样保留"
+        >
+          <ul class="merge-conflicts">
+            <li v-for="(text, index) in mergePlan.conflicts" :key="index">{{ text }}</li>
+          </ul>
+        </el-alert>
+      </template>
+
+      <template #footer>
+        <el-button @click="mergeVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="merging"
+          :disabled="!mergePlan || mergePlan.conflicts.length > 0"
+          @click="confirmMerge"
+        >
+          确认合并
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
 .alert {
   margin-bottom: 14px;
+}
+.head-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
 }
 .depth {
   display: flex;
@@ -407,9 +669,44 @@ async function applyBatchType(): Promise<void> {
 .mini {
   margin-left: 4px;
 }
+.former {
+  margin-top: 2px;
+}
 .warn {
   margin: 0;
   color: #c0392b;
   font-size: 12px;
+}
+.oor-row {
+  background: #fdf6ec !important;
+}
+.oor-text {
+  color: #c0392b;
+}
+.merge-empty {
+  padding: 18px;
+  text-align: center;
+}
+.merge-card {
+  border-radius: 10px;
+}
+.merge-block {
+  margin-top: 12px;
+}
+.block-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.merge-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.9;
+}
+.merge-conflicts {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  line-height: 1.8;
 }
 </style>

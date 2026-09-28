@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Artifact, ArtifactCategory, Completeness } from '@/types'
-import { ARTIFACT_CATEGORIES, COMPLETENESS } from '@/types'
+import { ARTIFACT_CATEGORIES, COMPLETENESS, isDepthWithin } from '@/types'
 import StratumDepthBar from '@/components/common/StratumDepthBar.vue'
 import UnitPicker from '@/components/common/UnitPicker.vue'
 import { useStore } from '@/hooks/usePersistentStore'
@@ -65,6 +65,25 @@ watch(
 
 function stratumOf(stratumId: string): string {
   return stratumState.strata.find((item) => item.id === stratumId)?.code ?? '未知单位'
+}
+
+/** 是否深度越界：合并时持久化的核对标记优先，其次按当前单位区间实时判断 */
+function isOutOfRange(artifact: Artifact): boolean {
+  if (artifact.depthNote) return true
+  const stratum = stratumState.strata.find((item) => item.id === artifact.stratumId)
+  return !!stratum && !isDepthWithin(stratum, artifact.z)
+}
+
+/** 越界说明（优先展示合并时留存的核对文字） */
+function outOfRangeText(artifact: Artifact): string {
+  if (artifact.depthNote) return artifact.depthNote
+  const stratum = stratumState.strata.find((item) => item.id === artifact.stratumId)
+  if (!stratum) return ''
+  return `出土深度 ${artifact.z} m 不在单位 ${stratum.code} 深度区间内，请核对层位`
+}
+
+function artifactRowClass(param: { row: Artifact }): string {
+  return isOutOfRange(param.row) ? 'oor-row' : ''
 }
 
 function trenchOf(stratumId: string): string {
@@ -146,6 +165,7 @@ async function submit(): Promise<void> {
     )
     return
   }
+  const existing = editingId.value ? artifactState.artifacts.find((item) => item.id === editingId.value) : undefined
   const row: Artifact = {
     id: editingId.value ?? uid('af'),
     stratumId: lockedStratum.value.id,
@@ -158,7 +178,11 @@ async function submit(): Promise<void> {
     z: Number(form.z) || 0,
     date: form.date,
     collector: form.collector.trim(),
-    tempLocation: form.tempLocation.trim()
+    tempLocation: form.tempLocation.trim(),
+    // 合并来源属于档案信息：换单位/改深度后重新校验，区间内则清除越界标记，来源号随当前单位更新
+    mergedFromCode:
+      existing && existing.stratumId === lockedStratum.value.id && existing.mergedFromCode ? existing.mergedFromCode : '',
+    depthNote: ''
   }
   await artifactStore.getState().save(row)
   ElMessage.success(`出土物 ${row.code} 已登记到 ${lockedStratum.value.code}`)
@@ -186,7 +210,8 @@ function exportList(): void {
       z: item.z,
       date: item.date,
       collector: item.collector,
-      tempLocation: item.tempLocation
+      tempLocation: item.tempLocation,
+      depthCheck: isOutOfRange(item) ? outOfRangeText(item) : '在区间内'
     })) as unknown as Record<string, unknown>[],
     [
       { key: 'code', label: '器物编号' },
@@ -198,6 +223,7 @@ function exportList(): void {
       { key: 'x', label: 'X(m)' },
       { key: 'y', label: 'Y(m)' },
       { key: 'z', label: 'Z 深度(m)' },
+      { key: 'depthCheck', label: '深度核对' },
       { key: 'date', label: '出土日期' },
       { key: 'collector', label: '提取人' },
       { key: 'tempLocation', label: '临时存放' }
@@ -307,16 +333,26 @@ function exportList(): void {
       <el-tag type="info" effect="plain">命中 {{ visible.length }} 条 · 合计 {{ totalCount }} 件</el-tag>
     </div>
 
-    <el-table :data="visible" border stripe row-key="id">
+    <el-table :data="visible" border stripe row-key="id" :row-class-name="artifactRowClass">
       <el-table-column prop="code" label="器物编号" width="140" />
       <el-table-column label="探方" width="150">
         <template #default="{ row }: { row: Artifact }">
           <span class="mono">{{ trenchOf(row.stratumId) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="地层单位" width="110">
+      <el-table-column label="地层单位" width="130">
         <template #default="{ row }: { row: Artifact }">
           <span class="mono">{{ stratumOf(row.stratumId) }}</span>
+          <el-tag
+            v-if="row.mergedFromCode"
+            size="small"
+            type="info"
+            effect="plain"
+            class="mini"
+            :title="`单位合并：由曾用单位号 ${row.mergedFromCode} 并入`"
+          >
+            原 {{ row.mergedFromCode }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="深度区间" width="240">
@@ -334,6 +370,14 @@ function exportList(): void {
       <el-table-column prop="completeness" label="残整" width="90" />
       <el-table-column label="出土坐标 (X,Y,Z)" width="170">
         <template #default="{ row }: { row: Artifact }">{{ row.x }}, {{ row.y }}, {{ row.z }}</template>
+      </el-table-column>
+      <el-table-column label="深度核对" width="100">
+        <template #default="{ row }: { row: Artifact }">
+          <el-tooltip v-if="isOutOfRange(row)" placement="top" effect="dark" :content="outOfRangeText(row)">
+            <el-tag type="danger" size="small" effect="dark">深度越界</el-tag>
+          </el-tooltip>
+          <el-tag v-else type="success" size="small" effect="plain">在区间内</el-tag>
+        </template>
       </el-table-column>
       <el-table-column prop="date" label="出土日期" width="120" />
       <el-table-column prop="collector" label="提取人" width="90" />
@@ -368,5 +412,11 @@ function exportList(): void {
 }
 .actions {
   padding-left: 100px;
+}
+.mini {
+  margin-left: 4px;
+}
+:deep(.oor-row) {
+  background: #fdf6ec !important;
 }
 </style>

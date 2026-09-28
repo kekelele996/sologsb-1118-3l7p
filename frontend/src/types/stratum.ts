@@ -27,6 +27,8 @@ export interface Stratum {
   date: string
   /** 绘图与拍照编号 */
   drawingNo: string
+  /** 曾用单位号：被并入本单位的旧单位号（合并地层单位时留存） */
+  formerCodes: string[]
 }
 
 /** 厚度（米） */
@@ -47,4 +49,15 @@ export function isCodeDuplicated(strata: Stratum[], candidate: Pick<Stratum, 'id
       item.trenchId === candidate.trenchId &&
       item.code.trim().toUpperCase() === candidate.code.trim().toUpperCase()
   )
+}
+
+/** 有效深度区间（兼容层序倒置的录入） */
+export function depthRange(stratum: Pick<Stratum, 'topDepth' | 'bottomDepth'>): { min: number; max: number } {
+  return { min: Math.min(stratum.topDepth, stratum.bottomDepth), max: Math.max(stratum.topDepth, stratum.bottomDepth) }
+}
+
+/** 出土深度是否落在单位深度区间内 */
+export function isDepthWithin(stratum: Pick<Stratum, 'topDepth' | 'bottomDepth'>, z: number): boolean {
+  const { min, max } = depthRange(stratum)
+  return z >= min && z <= max
 }

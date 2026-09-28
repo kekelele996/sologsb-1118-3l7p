@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { Artifact, Stratum } from '@/types'
-import { stratumThickness } from '@/types'
+import { stratumThickness, isDepthWithin } from '@/types'
 import StratumDepthBar from '@/components/common/StratumDepthBar.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { stratumStore } from '@/stores/stratumStore'
@@ -69,6 +69,13 @@ function artifactPos(artifact: Artifact): { x: number; y: number } {
 
 function stratumLabel(stratum: Stratum): string {
   return `${stratum.code} · ${stratum.type} · 厚 ${stratumThickness(stratum)} m`
+}
+
+/** 出土物是否深度越界（合并留存标记优先，其次按单位区间实时判断） */
+function isArtifactOutOfRange(artifact: Artifact): boolean {
+  if (artifact.depthNote) return true
+  const stratum = strata.value.find((item) => item.id === artifact.stratumId)
+  return !!stratum && !isDepthWithin(stratum, artifact.z)
 }
 
 const unitColors: Record<string, string> = {
@@ -169,9 +176,23 @@ const unitColors: Record<string, string> = {
           <!-- 出土物投影 -->
           <g v-if="showArtifacts">
             <g v-for="artifact in artifactsOfTrench" :key="artifact.id">
-              <circle :cx="artifactPos(artifact).x" :cy="artifactPos(artifact).y" r="5" fill="#c0392b" stroke="#fff" stroke-width="1.4" />
-              <text :x="artifactPos(artifact).x + 8" :y="artifactPos(artifact).y + 4" font-size="10" fill="#8a3a2c">
-                {{ artifact.code }}
+              <circle
+                :cx="artifactPos(artifact).x"
+                :cy="artifactPos(artifact).y"
+                r="5"
+                :fill="isArtifactOutOfRange(artifact) ? '#e6a23c' : '#c0392b'"
+                :stroke="isArtifactOutOfRange(artifact) ? '#7a4b00' : '#fff'"
+                :stroke-width="isArtifactOutOfRange(artifact) ? 1.8 : 1.4"
+              >
+                <title>{{ artifact.code }}{{ isArtifactOutOfRange(artifact) ? '（深度越界，需核对层位）' : '' }}</title>
+              </circle>
+              <text
+                :x="artifactPos(artifact).x + 8"
+                :y="artifactPos(artifact).y + 4"
+                font-size="10"
+                :fill="isArtifactOutOfRange(artifact) ? '#b27000' : '#8a3a2c'"
+              >
+                {{ artifact.code }}{{ isArtifactOutOfRange(artifact) ? ' ⚠' : '' }}
               </text>
             </g>
           </g>
@@ -186,6 +207,7 @@ const unitColors: Record<string, string> = {
         <div class="legend">
           <span v-for="(color, type) in unitColors" :key="type"><i :style="{ background: color }" />{{ type }}</span>
           <span><i class="artifact" />出土物投影点</span>
+          <span><i class="artifact artifact-oor" />深度越界投影点</span>
         </div>
       </el-card>
 
@@ -265,6 +287,9 @@ const unitColors: Record<string, string> = {
 .legend i.artifact {
   background: #c0392b;
   border-radius: 50%;
+}
+.legend i.artifact-oor {
+  background: #e6a23c;
 }
 .bars {
   display: flex;
