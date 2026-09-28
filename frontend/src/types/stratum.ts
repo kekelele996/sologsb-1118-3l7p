@@ -27,6 +27,8 @@ export interface Stratum {
   date: string
   /** 绘图与拍照编号 */
   drawingNo: string
+  /** 曾用号：合并其他重复地层单位后，被并入单位的单位号（含其历史曾用号）留存在保留单位上 */
+  formerCodes?: string[]
 }
 
 /** 厚度（米） */

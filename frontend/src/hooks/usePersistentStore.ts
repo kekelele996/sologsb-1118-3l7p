@@ -4,7 +4,7 @@ import Dexie, { type Table } from 'dexie'
 import type { Artifact, Relation, Stratum, Trench } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -47,6 +47,33 @@ class TrenchLogDb extends Dexie {
             }
             if (!Array.isArray(stratum.inclusions)) {
               stratum.inclusions = []
+            }
+          })
+      })
+    // v3：支持地层单位合并——地层单位新增「曾用号」，出土物新增「深度越界」标记
+    this.version(SCHEMA_VERSION)
+      .stores({
+        trenches: 'id, code, area, backfilled',
+        strata: 'id, trenchId, code, type, topDepth',
+        artifacts: 'id, stratumId, code, category, date',
+        relations: 'id, unitAId, unitBId, type, basis',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Stratum, string>('strata')
+          .toCollection()
+          .modify((stratum) => {
+            if (!Array.isArray(stratum.formerCodes)) {
+              stratum.formerCodes = []
+            }
+          })
+        await tx
+          .table<Artifact, string>('artifacts')
+          .toCollection()
+          .modify((artifact) => {
+            if (artifact.depthOutOfRange === undefined) {
+              artifact.depthOutOfRange = false
             }
           })
       })

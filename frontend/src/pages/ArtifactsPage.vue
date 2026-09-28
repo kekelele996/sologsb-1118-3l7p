@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { Artifact, ArtifactCategory, Completeness } from '@/types'
-import { ARTIFACT_CATEGORIES, COMPLETENESS } from '@/types'
+import type { Artifact, ArtifactCategory, Completeness, Stratum } from '@/types'
+import { ARTIFACT_CATEGORIES, COMPLETENESS, isArtifactDepthOutOfRange } from '@/types'
 import StratumDepthBar from '@/components/common/StratumDepthBar.vue'
 import UnitPicker from '@/components/common/UnitPicker.vue'
 import { useStore } from '@/hooks/usePersistentStore'
@@ -87,6 +87,24 @@ const visible = computed(() =>
 
 const totalCount = computed(() => visible.value.reduce((sum, item) => sum + item.count, 0))
 
+/** 所属单位；找不到（如数据残缺）返回 null */
+function stratumRowOf(stratumId: string): Stratum | null {
+  return stratumState.strata.find((item) => item.id === stratumId) ?? null
+}
+
+/** 是否深度越界：合并留下的持久化标记，或当前实时超出单位区间，任一命中即标出 */
+function isOutOfRange(artifact: Artifact): boolean {
+  if (artifact.depthOutOfRange) return true
+  const stratum = stratumRowOf(artifact.stratumId)
+  return stratum ? isArtifactDepthOutOfRange(artifact, stratum) : false
+}
+
+const outOfRangeCount = computed(() => visible.value.filter((item) => isOutOfRange(item)).length)
+
+function artifactRowClass(param: { row: Artifact }): string {
+  return isOutOfRange(param.row) ? 'out-of-range-row' : ''
+}
+
 function resetForm(): void {
   editingId.value = null
   form.code = ''
@@ -158,7 +176,9 @@ async function submit(): Promise<void> {
     z: Number(form.z) || 0,
     date: form.date,
     collector: form.collector.trim(),
-    tempLocation: form.tempLocation.trim()
+    tempLocation: form.tempLocation.trim(),
+    // 正常登记/编辑保存时深度已通过区间校验；历史合并越界标记随之解除
+    depthOutOfRange: false
   }
   await artifactStore.getState().save(row)
   ElMessage.success(`出土物 ${row.code} 已登记到 ${lockedStratum.value.code}`)
@@ -184,6 +204,7 @@ function exportList(): void {
       x: item.x,
       y: item.y,
       z: item.z,
+      depthOutOfRange: isOutOfRange(item) ? '深度越界' : '',
       date: item.date,
       collector: item.collector,
       tempLocation: item.tempLocation
@@ -198,6 +219,7 @@ function exportList(): void {
       { key: 'x', label: 'X(m)' },
       { key: 'y', label: 'Y(m)' },
       { key: 'z', label: 'Z 深度(m)' },
+      { key: 'depthOutOfRange', label: '深度复核' },
       { key: 'date', label: '出土日期' },
       { key: 'collector', label: '提取人' },
       { key: 'tempLocation', label: '临时存放' }
@@ -305,10 +327,25 @@ function exportList(): void {
         <el-option v-for="item in ARTIFACT_CATEGORIES" :key="item" :label="item" :value="item" />
       </el-select>
       <el-tag type="info" effect="plain">命中 {{ visible.length }} 条 · 合计 {{ totalCount }} 件</el-tag>
+      <el-tag v-if="outOfRangeCount > 0" type="danger" effect="dark">
+        {{ outOfRangeCount }} 条出土深度越界（多为地层单位合并所致，请核对层位）
+      </el-tag>
     </div>
 
-    <el-table :data="visible" border stripe row-key="id">
-      <el-table-column prop="code" label="器物编号" width="140" />
+    <el-table :data="visible" border stripe row-key="id" :row-class-name="artifactRowClass">
+      <el-table-column label="器物编号" width="170">
+        <template #default="{ row }: { row: Artifact }">
+          <span class="mono">{{ row.code }}</span>
+          <el-tooltip
+            v-if="isOutOfRange(row)"
+            placement="top"
+            effect="dark"
+            :content="`出土深度 Z=${row.z} m 不在所属单位区间内${row.depthOutOfRange ? '（合并标记）' : ''}`"
+          >
+            <el-tag type="danger" size="small" effect="dark" class="mini">深度越界</el-tag>
+          </el-tooltip>
+        </template>
+      </el-table-column>
       <el-table-column label="探方" width="150">
         <template #default="{ row }: { row: Artifact }">
           <span class="mono">{{ trenchOf(row.stratumId) }}</span>
@@ -333,7 +370,9 @@ function exportList(): void {
       <el-table-column prop="count" label="件数" width="80" />
       <el-table-column prop="completeness" label="残整" width="90" />
       <el-table-column label="出土坐标 (X,Y,Z)" width="170">
-        <template #default="{ row }: { row: Artifact }">{{ row.x }}, {{ row.y }}, {{ row.z }}</template>
+        <template #default="{ row }: { row: Artifact }">
+          <span :class="{ 'z-oor': isOutOfRange(row) }">{{ row.x }}, {{ row.y }}, {{ row.z }}</span>
+        </template>
       </el-table-column>
       <el-table-column prop="date" label="出土日期" width="120" />
       <el-table-column prop="collector" label="提取人" width="90" />
@@ -368,5 +407,15 @@ function exportList(): void {
 }
 .actions {
   padding-left: 100px;
+}
+.mini {
+  margin-left: 6px;
+}
+.z-oor {
+  color: #c0392b;
+  font-weight: 600;
+}
+:global(.out-of-range-row) {
+  background: #fdf2f2 !important;
 }
 </style>

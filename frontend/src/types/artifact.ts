@@ -28,4 +28,22 @@ export interface Artifact {
   collector: string
   /** 临时存放位置 */
   tempLocation: string
+  /**
+   * 深度越界标记：地层单位合并后，该器物出土深度超出保留单位深度区间时置为 true，
+   * 作为复核痕迹持久保留（不会因后续修改区间而自动消失）。
+   */
+  depthOutOfRange?: boolean
+}
+
+/**
+ * 出土深度是否落在地层单位深度区间之外（层序倒置的区间按上下界包络处理）。
+ * 合并预检与各页面展示统一用此判断。
+ */
+export function isArtifactDepthOutOfRange(
+  artifact: Pick<Artifact, 'z'>,
+  stratum: Pick<import('./stratum').Stratum, 'topDepth' | 'bottomDepth'>
+): boolean {
+  const upper = Math.min(stratum.topDepth, stratum.bottomDepth)
+  const lower = Math.max(stratum.topDepth, stratum.bottomDepth)
+  return artifact.z < upper || artifact.z > lower
 }
